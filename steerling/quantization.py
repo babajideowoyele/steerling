@@ -1,25 +1,24 @@
 """
 4-bit quantization and hybrid offloading for Steerling models.
 
-Two loading strategies for low-VRAM GPUs:
+Three loading strategies for low-VRAM GPUs:
 
-1. ``load_quantized``: All layers quantized to NF4, everything on GPU (~5.2 GB).
-2. ``load_hybrid``: Transformer quantized on GPU, concept heads in bf16 on CPU (~4.8 GB GPU).
-   Frees ~400 MB extra VRAM for activations / longer sequences.
-
-Both require the ``bitsandbytes`` package::
-
-    pip install bitsandbytes
+1. ``load_quantized``: NF4 via bitsandbytes, everything on GPU (~5.2 GB).
+2. ``load_hybrid``: NF4 transformer on GPU + bf16 concept heads on CPU (~4.8 GB GPU).
+3. ``load_torchao``: INT4 via torchao (PyTorch-native, no bitsandbytes needed).
 
 Usage::
 
-    from steerling.quantization import load_quantized, load_hybrid
+    from steerling.quantization import load_quantized, load_hybrid, load_torchao
 
-    # Pure quantized (simpler, faster)
+    # bitsandbytes NF4 (pip install bitsandbytes)
     generator = load_quantized("guidelabs/steerling-8b")
 
-    # Hybrid (more VRAM headroom, concept heads stay bf16 quality)
+    # Hybrid: NF4 on GPU + bf16 concept heads on CPU
     generator = load_hybrid("guidelabs/steerling-8b")
+
+    # torchao INT4 — no bitsandbytes needed (pip install torchao)
+    generator = load_torchao("guidelabs/steerling-8b")
 """
 
 from __future__ import annotations
@@ -488,5 +487,96 @@ def load_hybrid(
     gpu_vram = _estimate_vram_mb(model, device)
     cpu_ram = _estimate_vram_mb(model, "cpu")
     logger.info(f"GPU VRAM: ~{gpu_vram:.0f} MB | CPU RAM: ~{cpu_ram:.0f} MB")
+
+    return _finalize_generator(model, raw_config, is_interpretable, device)
+
+
+# ---------------------------------------------------------------------------
+# Strategy 3: torchao INT4 (PyTorch-native, no bitsandbytes)
+# ---------------------------------------------------------------------------
+
+
+def _apply_torchao_int4(
+    module: nn.Module,
+    *,
+    skip_names: set[str] | None = None,
+) -> None:
+    """Apply torchao int4 weight-only quantization, skipping named submodules.
+
+    torchao's ``quantize_`` mutates the model in-place, replacing Linear
+    layers with quantized equivalents.  We first detach the submodules
+    listed in *skip_names*, quantize, then reattach them.
+    """
+    from torchao.quantization import int4_weight_only, quantize_
+
+    skip_names = skip_names or set()
+    stashed: dict[str, nn.Module] = {}
+
+    # Temporarily detach modules we want to skip
+    for name in skip_names:
+        if hasattr(module, name):
+            stashed[name] = getattr(module, name)
+            setattr(module, name, nn.Identity())
+
+    quantize_(module, int4_weight_only())
+
+    # Reattach skipped modules
+    for name, child in stashed.items():
+        setattr(module, name, child)
+
+
+def load_torchao(
+    model_name_or_path: str = "guidelabs/steerling-8b",
+    device: str = "cuda",
+) -> SteerlingGenerator:
+    """Load a Steerling model with torchao INT4 weight-only quantization.
+
+    A **bitsandbytes-free** alternative.  Uses PyTorch-native INT4
+    quantization from the ``torchao`` package.  VRAM usage is comparable
+    to the bnb NF4 path (~5 GB).
+
+    Requires ``torchao`` (``pip install torchao``).
+
+    Args:
+        model_name_or_path: HuggingFace repo ID or local directory.
+        device: Target device (``"cuda"`` or ``"cpu"``).
+
+    Returns:
+        SteerlingGenerator ready for inference.
+    """
+    try:
+        import torchao  # noqa: F401
+    except ImportError as err:
+        raise ImportError(
+            "torchao is required for INT4 quantization. Install it with: pip install torchao"
+        ) from err
+
+    from steerling.configs.causal_diffusion import CausalDiffusionConfig
+
+    logger.info(f"Loading {model_name_or_path} with torchao INT4 quantization...")
+
+    model, raw_config, is_interpretable = _load_model_and_config(model_name_or_path)
+
+    model_fields = set(CausalDiffusionConfig.model_fields.keys())
+    model_data = {k: v for k, v in raw_config.items() if k in model_fields}
+    model_config = CausalDiffusionConfig.model_validate(model_data)
+
+    _break_weight_tying(model, model_config)
+
+    # Move to device first — torchao quantizes on-device
+    logger.info(f"Moving to {device}...")
+    model = model.to(device)
+
+    # Quantize, skipping concept heads (same reason as bnb path)
+    logger.info("Applying torchao INT4 weight-only quantization...")
+    _apply_torchao_int4(
+        model,
+        skip_names={"known_head", "unknown_head"},
+    )
+
+    model.eval()
+
+    vram = _estimate_vram_mb(model, device)
+    logger.info(f"Estimated VRAM: {vram:.0f} MB")
 
     return _finalize_generator(model, raw_config, is_interpretable, device)

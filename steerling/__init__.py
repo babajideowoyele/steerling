@@ -14,6 +14,7 @@ __all__ = [
     "SteerlingGenerator",
     "load_quantized",
     "load_hybrid",
+    "load_torchao",
 ]
 
 
@@ -35,3 +36,13 @@ def load_hybrid(
     from steerling.quantization import load_hybrid as _load_hybrid
 
     return _load_hybrid(model_name_or_path, device=device)
+
+
+def load_torchao(
+    model_name_or_path: str = "guidelabs/steerling-8b",
+    device: str = "cuda",
+) -> SteerlingGenerator:
+    """Load with torchao INT4 quantization. No bitsandbytes needed. Requires torchao."""
+    from steerling.quantization import load_torchao as _load_torchao
+
+    return _load_torchao(model_name_or_path, device=device)

@@ -43,9 +43,14 @@ eval = [
     "tqdm ~= 4.67.1",
 ]
 
-# 4-bit quantization for low-VRAM GPUs
+# 4-bit quantization for low-VRAM GPUs (bitsandbytes)
 quantize = [
     "bitsandbytes >= 0.43.0",
+]
+
+# INT4 quantization via torchao (PyTorch-native, no bitsandbytes)
+quantize-torchao = [
+    "torchao >= 0.5.0",
 ]
 
 # Notebook environment for analysis
