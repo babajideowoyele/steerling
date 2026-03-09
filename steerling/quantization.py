@@ -239,8 +239,16 @@ def _finalize_generator(
     raw_config: dict,
     is_interpretable: bool,
     device: str,
+    *,
+    skip_device_move: bool = False,
 ) -> SteerlingGenerator:
-    """Disable compiled flex_attention and wrap model in SteerlingGenerator."""
+    """Disable compiled flex_attention and wrap model in SteerlingGenerator.
+
+    Args:
+        skip_device_move: If True, prevent SteerlingGenerator.__init__ from
+            calling model.to(device).  Used by load_hybrid where concept
+            heads intentionally live on CPU.
+    """
     from steerling.configs.causal_diffusion import CausalDiffusionConfig
     from steerling.data.tokenizer import SteerlingTokenizer
     from steerling.inference.causal_diffusion import SteerlingGenerator
@@ -254,13 +262,24 @@ def _finalize_generator(
     model_data = {k: v for k, v in raw_config.items() if k in model_fields}
     model_config = CausalDiffusionConfig.model_validate(model_data)
 
-    return SteerlingGenerator(
+    if skip_device_move:
+        # Temporarily replace model.to so SteerlingGenerator.__init__
+        # doesn't move concept heads off CPU.
+        original_to = model.to
+        model.to = lambda *args, **kwargs: model  # type: ignore[assignment]
+
+    gen = SteerlingGenerator(
         model=model,
         tokenizer=SteerlingTokenizer(),
         model_config=model_config,
         is_interpretable=is_interpretable,
         device=device,
     )
+
+    if skip_device_move:
+        model.to = original_to  # type: ignore[assignment]
+
+    return gen
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +564,9 @@ def load_hybrid(
     cpu_ram = _estimate_vram_mb(model, "cpu")
     logger.info(f"GPU VRAM: ~{gpu_vram:.0f} MB | CPU RAM: ~{cpu_ram:.0f} MB")
 
-    return _finalize_generator(model, raw_config, is_interpretable, device)
+    return _finalize_generator(
+        model, raw_config, is_interpretable, device, skip_device_move=True
+    )
 
 
 # ---------------------------------------------------------------------------
