@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def _replace_linear_with_4bit(
     module: nn.Module,
     *,
@@ -174,9 +175,7 @@ def _break_weight_tying(model: nn.Module, model_config: object) -> None:
     base = model.transformer if hasattr(model, "transformer") else model
     if getattr(model_config, "weight_sharing", False):
         logger.info("Breaking weight tying for quantization...")
-        base.lm_head.weight = nn.Parameter(
-            base.tok_emb.weight.data.clone(), requires_grad=False
-        )
+        base.lm_head.weight = nn.Parameter(base.tok_emb.weight.data.clone(), requires_grad=False)
 
 
 def _finalize_generator(
@@ -212,6 +211,7 @@ def _finalize_generator(
 # Strategy 1: Pure quantized (everything on GPU)
 # ---------------------------------------------------------------------------
 
+
 def load_quantized(
     model_name_or_path: str = "guidelabs/steerling-8b",
     device: str = "cuda",
@@ -230,11 +230,10 @@ def load_quantized(
     """
     try:
         import bitsandbytes as bnb  # noqa: F401
-    except ImportError:
+    except ImportError as err:
         raise ImportError(
-            "bitsandbytes is required for 4-bit quantization. "
-            "Install it with: pip install bitsandbytes"
-        )
+            "bitsandbytes is required for 4-bit quantization. Install it with: pip install bitsandbytes"
+        ) from err
 
     from steerling.configs.causal_diffusion import CausalDiffusionConfig
 
@@ -268,6 +267,7 @@ def load_quantized(
 # ---------------------------------------------------------------------------
 # Strategy 2: Hybrid (transformer quantized on GPU, concept heads on CPU)
 # ---------------------------------------------------------------------------
+
 
 class _HybridInterpretableForward:
     """Replaces InterpretableCausalDiffusionLM.forward with device-aware version.
@@ -379,9 +379,7 @@ class _HybridInterpretableForward:
             and unknown_topk > 0
         ):
             with torch.no_grad():
-                _unk_topk_indices, _unk_topk_logits = m._compute_unknown_topk(
-                    hidden_cpu, unknown_topk
-                )
+                _unk_topk_indices, _unk_topk_logits = m._compute_unknown_topk(hidden_cpu, unknown_topk)
 
         outputs = InterpretableOutput(
             hidden=hidden_gpu,
@@ -433,11 +431,10 @@ def load_hybrid(
     """
     try:
         import bitsandbytes as bnb  # noqa: F401
-    except ImportError:
+    except ImportError as err:
         raise ImportError(
-            "bitsandbytes is required for hybrid quantization. "
-            "Install it with: pip install bitsandbytes"
-        )
+            "bitsandbytes is required for hybrid quantization. Install it with: pip install bitsandbytes"
+        ) from err
 
     from steerling.configs.causal_diffusion import CausalDiffusionConfig
     from steerling.models.interpretable.interpretable_causal_diffusion import (

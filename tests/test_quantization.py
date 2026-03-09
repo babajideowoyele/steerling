@@ -143,15 +143,15 @@ class TestReplaceLinear:
 
         # Concept heads should still have nn.Linear
         known_linears = [
-            m for m in interpretable_model.known_head.modules()
+            m
+            for m in interpretable_model.known_head.modules()
             if isinstance(m, nn.Linear) and not isinstance(m, bnb.nn.Linear4bit)
         ]
         assert len(known_linears) > 0
 
         # Transformer should be quantized
         transformer_4bit = [
-            m for m in interpretable_model.transformer.modules()
-            if isinstance(m, bnb.nn.Linear4bit)
+            m for m in interpretable_model.transformer.modules() if isinstance(m, bnb.nn.Linear4bit)
         ]
         assert len(transformer_4bit) > 0
 
@@ -183,8 +183,13 @@ class TestWeightTying:
 
     def test_tying_not_broken_when_disabled(self, vocab_size):
         config = CausalDiffusionConfig(
-            n_layers=2, n_head=4, n_embd=128, block_size=256,
-            n_kv_heads=2, diff_block_size=16, weight_sharing=False,
+            n_layers=2,
+            n_head=4,
+            n_embd=128,
+            block_size=256,
+            n_kv_heads=2,
+            diff_block_size=16,
+            weight_sharing=False,
         )
         model = CausalDiffusionLM(config, vocab_size=vocab_size).to(dtype=torch.bfloat16)
         ptr_before = model.lm_head.weight.data_ptr()
@@ -290,9 +295,7 @@ class TestQuantizedForwardCUDA:
         assert torch.isfinite(logits).all()
 
     @requires_cuda
-    def test_interpretable_model_forward(
-        self, interpretable_model, tiny_config, vocab_size
-    ):
+    def test_interpretable_model_forward(self, interpretable_model, tiny_config, vocab_size):
         _disable_compiled_flex_attention()
         _break_weight_tying(interpretable_model, tiny_config)
         _replace_linear_with_4bit(
@@ -306,9 +309,7 @@ class TestQuantizedForwardCUDA:
         input_ids = torch.randint(0, vocab_size, (B, T), device="cuda")
 
         with torch.no_grad():
-            logits, outputs = interpretable_model(
-                input_ids, use_teacher_forcing=False
-            )
+            logits, outputs = interpretable_model(input_ids, use_teacher_forcing=False)
 
         assert logits.shape == (B, T, vocab_size)
         assert torch.isfinite(logits).all()
