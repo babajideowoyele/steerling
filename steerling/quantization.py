@@ -99,6 +99,40 @@ def _count_params_by_dtype(model: nn.Module) -> dict[str, int]:
     return counts
 
 
+def _assign_tensor(model: nn.Module, key: str, tensor: Tensor) -> None:
+    """Assign a tensor to a model parameter by dotted key, materializing from meta."""
+    parts = key.split(".")
+    mod = model
+    for part in parts[:-1]:
+        mod = getattr(mod, part)
+    param_name = parts[-1]
+    old = getattr(mod, param_name)
+    if isinstance(old, nn.Parameter):
+        setattr(mod, param_name, nn.Parameter(tensor, requires_grad=False))
+    else:
+        setattr(mod, param_name, tensor)
+
+
+def _resolve_weight_tying(
+    base: nn.Module, state_dict: dict[str, Tensor], model_config: object
+) -> None:
+    """Handle weight tying after meta→CPU assignment."""
+    if not getattr(model_config, "weight_sharing", False):
+        return
+    # If lm_head wasn't in state_dict, copy from tok_emb
+    if hasattr(base, "lm_head") and base.lm_head.weight.device.type == "meta":
+        if hasattr(base, "tok_emb") and base.tok_emb.weight.device.type != "meta":
+            base.lm_head.weight = base.tok_emb.weight
+    # If tok_emb wasn't in state_dict, copy from lm_head
+    elif (
+        hasattr(base, "tok_emb")
+        and base.tok_emb.weight.device.type == "meta"
+        and hasattr(base, "lm_head")
+        and base.lm_head.weight.device.type != "meta"
+    ):
+        base.tok_emb.weight = base.lm_head.weight
+
+
 def _estimate_vram_mb(model: nn.Module, device: str = "cuda") -> float:
     """Estimate VRAM usage from parameters on the given device."""
     total = 0
@@ -114,9 +148,14 @@ def _load_model_and_config(
 ) -> tuple[nn.Module, dict, bool]:
     """Shared model creation and weight loading (on CPU, bf16).
 
+    Uses meta-device initialization + per-tensor weight assignment to
+    keep peak RAM at ~17 GB instead of ~34 GB (model + state dict).
+
     Returns:
         (model, raw_config, is_interpretable)
     """
+    import gc
+
     from steerling.configs.causal_diffusion import CausalDiffusionConfig
     from steerling.configs.concept import ConceptConfig
     from steerling.data.tokenizer import SteerlingTokenizer
@@ -136,35 +175,53 @@ def _load_model_and_config(
     concept_data = raw_config.get("concept")
     vocab_size = raw_config.get("vocab_size", SteerlingTokenizer().vocab_size)
 
-    logger.info("Creating model on CPU...")
-    if is_interpretable and concept_data is not None:
-        concept_config = ConceptConfig.model_validate(concept_data)
-        model: nn.Module = InterpretableCausalDiffusionLM(
-            config=model_config,
-            concept_config=concept_config,
-            vocab_size=vocab_size,
-        )
-    else:
-        model = CausalDiffusionLM(config=model_config, vocab_size=vocab_size)
+    # Create model on meta device (no memory allocated for parameters)
+    logger.info("Creating model on meta device...")
+    with torch.device("meta"):
+        if is_interpretable and concept_data is not None:
+            concept_config = ConceptConfig.model_validate(concept_data)
+            model: nn.Module = InterpretableCausalDiffusionLM(
+                config=model_config,
+                concept_config=concept_config,
+                vocab_size=vocab_size,
+            )
+        else:
+            model = CausalDiffusionLM(config=model_config, vocab_size=vocab_size)
 
-    logger.info("Loading weights on CPU...")
+    # Load state dict (only copy in RAM: ~17 GB)
+    logger.info("Loading weights...")
     state_dict = load_state_dict(model_name_or_path)
 
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    # Materialize model from meta → CPU by assigning state dict tensors
+    logger.info("Assigning weights to model (meta → CPU)...")
+    model_sd = model.state_dict()
+
+    # Collect keys that exist in both model and checkpoint
+    assigned = set()
+    for key in list(model_sd.keys()):
+        if key in state_dict:
+            # Navigate to the parameter and replace it
+            _assign_tensor(model, key, state_dict.pop(key).to(torch.bfloat16))
+            assigned.add(key)
+
+    # Handle weight tying: tok_emb.weight may need to come from lm_head or vice versa
+    base = model.transformer if hasattr(model, "transformer") else model
+    _resolve_weight_tying(base, state_dict, model_config)
+
+    # Report missing / unexpected
+    model_keys = set(model_sd.keys())
+    missing = model_keys - assigned
     if missing:
         non_tying = [k for k in missing if "lm_head" not in k]
         if non_tying:
             logger.warning(f"Missing keys (non-tying): {non_tying}")
+    unexpected = set(state_dict.keys())
     if unexpected:
         logger.warning(f"Unexpected keys: {unexpected}")
 
-    # Restore weight tying so weights are correct
-    if hasattr(model, "transformer"):
-        model.transformer._restore_weight_tying()
-    elif hasattr(model, "_restore_weight_tying"):
-        model._restore_weight_tying()
-
-    model = model.to(dtype=torch.bfloat16)
+    # Free remaining state dict
+    del state_dict, model_sd
+    gc.collect()
 
     return model, raw_config, is_interpretable
 
