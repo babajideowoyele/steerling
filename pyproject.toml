@@ -43,6 +43,11 @@ eval = [
     "tqdm ~= 4.67.1",
 ]
 
+# 4-bit quantization for low-VRAM GPUs
+quantize = [
+    "bitsandbytes >= 0.43.0",
+]
+
 # Notebook environment for analysis
 notebook = [
     "jupyter ~= 1.1.1",
